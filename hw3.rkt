@@ -1,7 +1,6 @@
 #lang pl 03
 
 #|
-
 BNF for the PUWAE language:
      <PUWAE> ::= <num>
              | { + <PUWAE> <PUWAE> }
@@ -11,15 +10,14 @@ BNF for the PUWAE language:
              | { with { <id> <PUWAE> } <PUWAE> }
              | <id>
              | { post <POST> ... }
-
      <POST> ::= <PUWAE>
              | +
              | -
              | *
              | /
-
 |#
 
+;; Type definition for <POST>
 (define-type PostfixItem = (U PUWAE '+ '- '* '/))
 
 ;; PUWAE abstract syntax trees
@@ -65,17 +63,10 @@ BNF for the PUWAE language:
 (define (parse str)
   (parse-sexpr (string->sexpr str)))
 
-(test (parse "5") => (Num 5))
-(test (parse "{post 1 2 3}") => (Post (list (Num 1) (Num 2) (Num 3))))
-(test (parse "{* {post 1 2 +} {post 3 4 +}}") =>
-      (Mul (Post (list (Num 1) (Num 2) '+)) (Post (list (Num 3) (Num 4) '+))))
-(test (parse "{with {x {post 3 4 +}} {post 1 2 + x *}}") =>
-     (With 'x (Post (list (Num 3) (Num 4)'+))
-           (Post (list (Num 1) (Num 2) '+ (Id 'x) '*))))
 
 #| Formal specs for `subst':
-   (`N' is a <num>, `E1', `E2' are <WAE>s, `x' is some <id>,
-   `y' is a *different* <id>)
+   (`N' is a <num>, `E1', `E2' are <PUWAE>s, 'E3' is a <POST>,
+    `x' is some <id>, `y' is a *different* <id>)
       N[v/x]                = N
       {+ E1 E2}[v/x]        = {+ E1[v/x] E2[v/x]}
       {- E1 E2}[v/x]        = {- E1[v/x] E2[v/x]}
@@ -85,6 +76,7 @@ BNF for the PUWAE language:
       x[v/x]                = v
       {with {y E1} E2}[v/x] = {with {y E1[v/x]} E2[v/x]}
       {with {x E1} E2}[v/x] = {with {x E1[v/x]} E2}
+      {post E3 ...}[v/x]    = {post E3[v/x] ...}
 |#
 
 (: subst : PUWAE Symbol PUWAE -> PUWAE)
@@ -94,9 +86,7 @@ BNF for the PUWAE language:
 (define (subst expr from to)
   (: post-subst : PostfixItem -> PostfixItem)
   (define (post-subst item)
-    (if (symbol? item)
-        (if (eq? item from) to item)
-        (subst item from to)))
+    (if (symbol? item) item (subst item from to)))
   (cases expr
     [(Num n) expr]
     [(Add l r) (Add (subst l from to) (subst r from to))]
@@ -108,18 +98,11 @@ BNF for the PUWAE language:
      (With bound-id
            (subst named-expr from to)
            (if (eq? bound-id from)
-             bound-body
-             (subst bound-body from to)))]
+               bound-body
+               (subst bound-body from to)))]
     [(Post items) (Post (map post-subst items))]))
 
-;(test (subst (Post '+ (Num 1)) 'x (Num 3)) => (Post '+ (Num 1)))
-(test (subst (Add (Id 'x) (Num 5)) 'x (Num 3)) => (Add (Num 3) (Num 5)))
-(test (subst (Post (list (Id 'x) (Num 5))) 'x (Num 3)) =>
-      (Post (list (Num 3) (Num 5))))
-(test (subst (Post (list '+ '- '* '/)) '+ (Num 3)) =>
-      (Post (list (Num 3) '- '* '/)))
-;(test (subst (Post (list '+ '-)) '+ '-) =>
-;      (Post (list '- '- )))
+
 
 #| Formal specs for `eval':
      eval(N)         = N
@@ -129,32 +112,7 @@ BNF for the PUWAE language:
      eval({/ E1 E2}) = eval(E1) / eval(E2)
      eval(id)        = error!
      eval({with {x E1} E2}) = eval(E2[eval(E1)/x])
-|#
-
-#|
-
-(: post-eval : (Listof PostfixItem) (Listof Number) -> Number)
-;; evaluates a postfix sequence of items, using a stack
-(define (post-eval items stack)
-  (if (null? items)
-    (match stack
-     ; [(list: l) (error 'post-eval "leftover values ~s" l)]
-     ; [else 0])
-      )
-    (let ([1st  (first items)]
-          [more (rest items)])
-      (: pop2-and-apply : (Number Number -> Number) -> Number)
-      (define (pop2-and-apply func)
-        (match stack fill-in))
-      (cond [(eq? '+ 1st) (pop2-and-apply fill-in)]
-            [(eq? '- 1st) (pop2-and-apply fill-in)]
-            [(eq? '* 1st) (pop2-and-apply fill-in)]
-            [(eq? '/ 1st) (pop2-and-apply fill-in)]
-            [else (post-eval fill-in)]))))
-
-
-(test (post-eval (list (Num 10) (Num 2) '* (Add (Num 3) (Num 2)) '/) (list))
-  -> 4)
+     eval({post E3 ...})   = eval({post eval(E3) ...})
 |#
 
 (: eval : PUWAE -> Number)
@@ -171,17 +129,40 @@ BNF for the PUWAE language:
                   bound-id
                   (Num (eval named-expr))))]
     [(Id name) (error 'eval "free identifier: ~s" name)]
-    ;[(Post items) ]
-    ;; delete this else
-    [else -1]))
+    [(Post items) (post-eval items (list))]))
+
+
+(: post-eval : (Listof PostfixItem) (Listof Number) -> Number)
+;; evaluates a postfix sequence of items, using a stack
+(define (post-eval items stack)
+  (if (null? items)
+      (match stack
+        [(list (number: n1) (number: n2))
+         (error 'post-eval "leftover values ~s" stack)]
+        [(list (number: n)) n]
+        [else (error 'post-eval "ran out of stack values ~s" stack)])
+      (let ([1st  (first items)]
+            [more (rest items)]) 
+        (: pop2-and-apply : (Number Number -> Number) -> Number)
+        (define (pop2-and-apply func)
+          (match stack
+            [(list (number: n1) (number: n2))
+             ;; update the stack w the result of func
+             (post-eval more (cons (func n2 n1) (list)))]
+            [(list (number: n1) (number: n2) rest)
+             (post-eval more (cons (func n2 n1) (list rest)))]
+            [else (error 'post-eval "less than 2 numbers in stack ~s" stack)]))
+        (cond [(eq? '+ 1st) (pop2-and-apply +)]
+              [(eq? '- 1st) (pop2-and-apply -)]
+              [(eq? '* 1st) (pop2-and-apply *)]
+              [(eq? '/ 1st) (pop2-and-apply /)]
+              [else (post-eval (rest items) (cons (eval 1st) stack))]))))
 
 (: run : String -> Number)
 ;; evaluate a PUWAE program contained in a string
 (define (run str)
   (eval (parse str)))
-
-;(test (run "{post 3 1 -}") => 2)
-
+ 
 ;; tests
 (test (run "5") => 5)
 (test (run "{+ 5 5}") => 10)
@@ -200,3 +181,20 @@ BNF for the PUWAE language:
 (test (run "{with {x 5} {! x}}") =error> "bad syntax in (! x)")
 (test (run "{with {x 5 6} x}") =error> "bad `with' syntax in (with (x 5 6) x")
 (test (run "{with {x} x}") =error> "bad `with' syntax in (with (x) x")
+(test (run "{post 3 1 -}") => 2)
+(test (run "{post 50 10 /}") => 5)
+(test (run "{post 1 2 +}") => 3)
+(test (run "{* {post 1 2 +} {post 3 4 +}}") => 21)
+(test (run "{post 1 2 + 3 4 + *}") => 21)
+(test (run "{post 1 2 + {+ 3 4} *}") => 21)
+(test (run "{post {post 1 2 +} {post 3 4 +} *}") => 21)
+(test (run "{* {+ {post 1} {post 2}} {+ {post 3} {post 4}}}") => 21)
+(test (run "{with {x {post 3 4 +}} {post 1 2 + x *}}") => 21)
+(test (run "{post 3 4 6 + 4 - * + }")
+      =error> "less than 2 numbers in stack (18)")
+(test (run "{post 3 4}") =error> "leftover values (4 3)")
+(test (run "{post }") =error> "ran out of stack values ()")
+ 
+
+ 
+(define minutes-spent 500)
